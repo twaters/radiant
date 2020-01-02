@@ -239,12 +239,12 @@ impl ArbiterServer {
 					// Register a new node and spawn the child thread
 					if let Some(new_socket) = ArbiterServer::register_node(&message, &nodes, &ctx) {
 						nodes.insert(message.identity.clone(), new_socket);
-					}
 			
-					// Send a connection accept (TODO: Handle a return value on register_node before sending)
-					let accept_msg = ArbiterMessage::new(&message.identity, MessageType::AcceptConnection);
-					if let Some(socket) = nodes.get(server_identity) {
-						accept_msg.send(&socket);
+						// Send a connection accept
+						let accept_msg = ArbiterMessage::new(&message.identity, MessageType::AcceptConnection);
+						if let Some(socket) = nodes.get(server_identity) {
+							accept_msg.send(&socket);
+						}
 					}
 				},
 				MessageType::Deregister => {
@@ -310,9 +310,13 @@ impl ArbiterServer {
 					if wait_for_message(MessageType::Ping, 5000, &child_socket).is_err() {
 						// Send deregistration to the parent thread
 						let mut dereg_msg = ArbiterMessage::new(&ident, MessageType::Deregister);
+						
+						// ipc sockets don't include the identity name in the message envelope,
+						// so use the first data frame to include the name of the client node
+						// that has deregistered
 						dereg_msg.data_frames[0] = zmq::Message::from(&ident);
 						dereg_msg.send(&child_socket);
-						println!("should deregister..");
+
 						// Exit the thread
 						break;
 					}
