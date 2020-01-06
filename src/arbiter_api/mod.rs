@@ -1,45 +1,43 @@
 use std::collections::HashMap;
 
 #[derive(Copy, Clone)]
-enum MessageType {
+enum ArbiterMessageTypes {
 	Register = 0,
 	AcceptConnection = 1,
 	Deregister = 2,
 	Ping = 3,
 	Pong = 4,
-	UNKNOWN = 5,
+	StateRequest = 5,
+	UNKNOWN = 6,
 }
 
-impl MessageType {	
-	fn from_u8(value : u8) -> MessageType {
+impl ArbiterMessageTypes {	
+	fn from_u8(value : u8) -> ArbiterMessageTypes {
 		match value {
-			0 => MessageType::Register,
-			1 => MessageType::AcceptConnection,
-			2 => MessageType::Deregister,
-			3 => MessageType::Ping,
-			4 => MessageType::Pong,
-			_ => MessageType::UNKNOWN,
+			0 => ArbiterMessageTypes::Register,
+			1 => ArbiterMessageTypes::AcceptConnection,
+			2 => ArbiterMessageTypes::Deregister,
+			3 => ArbiterMessageTypes::Ping,
+			4 => ArbiterMessageTypes::Pong,
+			5 => ArbiterMessageTypes::StateRequest,
+			_ => ArbiterMessageTypes::UNKNOWN,
 		}
 	}
 }
 
 struct ArbiterMessage {
 	identity : String,
-	message_type : MessageType,
+	message_type : ArbiterMessageTypes,
 	data_frames : Vec<zmq::Message>,
 }
 
 impl ArbiterMessage {
-	fn new(identity : &str, message_type : MessageType) -> ArbiterMessage {
+	fn new(identity : &str, message_type : ArbiterMessageTypes) -> ArbiterMessage {
 		ArbiterMessage {
 			identity : identity.to_string(),
 			message_type,
 			// Allocate room for 4 data frames
-			data_frames : vec!(
-				zmq::Message::new(),
-				zmq::Message::new(),
-				zmq::Message::new(),
-				zmq::Message::new()),
+			data_frames : Vec::<zmq::Message>::new(),
 		}
 	}
 
@@ -79,7 +77,7 @@ impl ArbiterMessage {
 //		} else if self.frames[2].len() != 2 {
 //			println!("bad header len");
 //			return Err(zmq::Error::EPROTO);
-//		} else if self.frames[2][1] >= MessageType::UNKNOWN as u8{
+//		} else if self.frames[2][1] >= ArbiterMessageTypes::UNKNOWN as u8{
 //			println!("wrong message type");
 //			return Err(zmq::Error::ENOTSUP);
 //		} 
@@ -95,8 +93,25 @@ impl ArbiterMessage {
 		true
 	}
 	
-	fn get_message_type(&self) -> MessageType {
+	fn get_message_type(&self) -> ArbiterMessageTypes {
 		self.message_type
+	}
+}
+
+#[derive(Copy, Clone)]
+pub enum MessageType {
+	Command = 0,
+	Data = 1,
+	UNKNOWN = 2,
+}
+
+impl MessageType {	
+	pub fn from_u8(value : u8) -> MessageType {
+		match value {
+			0 => MessageType::Command,
+			1 => MessageType::Data,
+			_ => MessageType::UNKNOWN,
+		}
 	}
 }
 
@@ -104,44 +119,70 @@ pub struct ArbiterClient {
 	server_identity : String,
 	my_identity : String,
 	network_state_socket : zmq::Socket,
+	command_messages : Vec<String>,
+	data_messages : Vec<String>,
 }
 
 impl ArbiterClient {
-	pub fn new(ctx : &zmq::Context, identity : &str, connection_string : &str) -> ArbiterClient {
+	pub fn new(ctx : &zmq::Context, identity : &str) -> ArbiterClient {
 		// Construct an ArbiterClient struct
-		let arbiter = ArbiterClient {
+		ArbiterClient {
 			server_identity : String::from("ARBITER"),
 			my_identity : String::from(identity),
 			network_state_socket : ctx.socket(zmq::SUB).unwrap(),
-		};
-		
+			command_messages : Vec::<String>::new(),
+			data_messages : Vec::<String>::new(),
+		}
+	}
+	
+	pub fn add_message(&mut self, message_type : MessageType, name : String) {
+		match message_type {
+			MessageType::Command => self.command_messages.push(name),
+			MessageType::Data => self.data_messages.push(name),
+			_ => println!("Unsupported message type"),
+		}
+	}
+	
+	pub fn connect(&self, ctx : &zmq::Context, connection_string : &str) {
 		// Setup a socket for processing registration and pings
 		let registration_socket = ctx.socket(zmq::DEALER).unwrap();
-		let server_identity2 = arbiter.server_identity.clone();
-		registration_socket.set_identity(identity.as_bytes()).unwrap();
+		let server_identity2 = self.server_identity.clone();
+		registration_socket.set_identity(self.my_identity.as_bytes()).unwrap();
 		registration_socket.connect(connection_string).unwrap();
 		
 		// Start the thread to process registration and pings
+		let command_messages = self.command_messages.clone();
+		let data_messages = self.data_messages.clone();
 		std::thread::Builder::new().name("Arbitration".to_string())
 			.spawn(move || {
 				// First, register with the arbiter
-				ArbiterClient::register(&registration_socket, &server_identity2);
+				ArbiterClient::register(&registration_socket, &server_identity2, command_messages, data_messages);
 	
 				// Now, just ping forever
 				ArbiterClient::ping (&registration_socket, &server_identity2);
 			}).unwrap();
-		
-		arbiter
 	}
 	
-	
-	
-	fn register(registration_socket : &zmq::Socket, server_identity : &str) {
+	fn register(registration_socket : &zmq::Socket, server_identity : &str, command_messages : Vec<String>, data_messages : Vec<String>) {
 		let mut cont = true;
 		while cont {
-			let register_msg = ArbiterMessage::new("", MessageType::Register);
+			let mut register_msg = ArbiterMessage::new("", ArbiterMessageTypes::Register);
+			// Add all the messages
+			for command in &command_messages {
+				register_msg.data_frames.push(zmq::Message::from(&command));
+			}
+			for data in &data_messages {
+				register_msg.data_frames.push(zmq::Message::from(&data));
+			}
+			
 			register_msg.send(registration_socket);
-			cont = wait_for_message(MessageType::AcceptConnection, 2000, &registration_socket).is_err();
+			
+			
+			cont = wait_for_message(ArbiterMessageTypes::AcceptConnection, 2000, &registration_socket).is_err();
+			
+			let req_state_msg = ArbiterMessage::new("", ArbiterMessageTypes::StateRequest);
+			req_state_msg.send(registration_socket);
+			
 			println!("regi cont: {}", cont);
 		}
 
@@ -150,9 +191,9 @@ impl ArbiterClient {
 
 	fn ping(socket : &zmq::Socket, server_identity : &str) {
 		loop {
-			let ping = ArbiterMessage::new("", MessageType::Ping);
+			let ping = ArbiterMessage::new("", ArbiterMessageTypes::Ping);
 			ping.send(socket);
-			if wait_for_message(MessageType::Pong, 1000, &socket).is_ok() {
+			if wait_for_message(ArbiterMessageTypes::Pong, 1000, &socket).is_ok() {
 				println!("got pong");
 				std::thread::sleep(std::time::Duration::from_millis(1000));
 			} else {
@@ -177,31 +218,19 @@ impl ArbiterServer {
 		// Startup the state publisher thread
 		let pub_state_socket = ctx.socket(zmq::PUB).unwrap();
 		pub_state_socket.bind(pub_state_bind).unwrap();
-		std::thread::Builder::new().name("State_Publisher".to_string())
-			.spawn(move || {
-				ArbiterServer::state_publisher(&pub_state_socket);
-			}).unwrap();
 			
 		// Setup the main router socket for processing node requests
 		let node_request_socket = ctx.socket(zmq::ROUTER).unwrap();
 		node_request_socket.set_identity(self.my_identity.as_bytes()).unwrap();
 		node_request_socket.bind(node_request_bind).unwrap();
-		ArbiterServer::process_node_requests(node_request_socket, &ctx, self.my_identity);
+		ArbiterServer::process_node_requests(node_request_socket, pub_state_socket, &ctx, self.my_identity);
 	}
 	
-	fn state_publisher(socket : &zmq::Socket) {
-		let mut i = 0;
-		loop {
-			i += 1;
-			let state = zmq::Message::from_slice(i.to_string().as_bytes());
-			socket.send(state, 0).unwrap();
-
-			println!("published {}", i);
-			std::thread::sleep(std::time::Duration::from_millis(1000));
-		}
+	fn publish_state(pub_state_socket : &zmq::Socket) {
+		println!("publish state");
 	}
 	
-	fn process_node_requests(node_request_socket : zmq::Socket, ctx : &zmq::Context, server_identity : String) {
+	fn process_node_requests(node_request_socket : zmq::Socket, pub_state_socket : zmq::Socket, ctx : &zmq::Context, server_identity : String) {		
 		let mut nodes = HashMap::new();
 		nodes.insert(server_identity.clone(), node_request_socket);
 	
@@ -227,45 +256,52 @@ impl ArbiterServer {
 				}
 			}
 
-			ArbiterServer::process_messages(messages, &mut nodes, &ctx, &server_identity);
+			ArbiterServer::process_messages(messages, &mut nodes, &ctx, &server_identity, &pub_state_socket);
 		}
 	}	
 	
-	fn process_messages(messages : Vec<ArbiterMessage>, nodes : &mut HashMap<String, zmq::Socket>, ctx : &zmq::Context, server_identity : &String) {
+	fn process_messages(messages : Vec<ArbiterMessage>, nodes : &mut HashMap<String, zmq::Socket>, ctx : &zmq::Context, server_identity : &String, pub_state_socket : &zmq::Socket) {
 		for message in messages {
 			match message.get_message_type() {
-				MessageType::Register => {
+				ArbiterMessageTypes::Register => {
 					println!("got register");
 					// Register a new node and spawn the child thread
 					if let Some(new_socket) = ArbiterServer::register_node(&message, &nodes, &ctx) {
 						nodes.insert(message.identity.clone(), new_socket);
 			
 						// Send a connection accept
-						let accept_msg = ArbiterMessage::new(&message.identity, MessageType::AcceptConnection);
+						let accept_msg = ArbiterMessage::new(&message.identity, ArbiterMessageTypes::AcceptConnection);
 						if let Some(socket) = nodes.get(server_identity) {
 							accept_msg.send(&socket);
 						}
+						
+						ArbiterServer::publish_state(&pub_state_socket);
 					}
 				},
-				MessageType::Deregister => {
+				ArbiterMessageTypes::Deregister => {
 					// Remove the client from the list of nodes
 					println!("removing {}", message.data_frames[0].as_str().unwrap());
 					nodes.remove(message.data_frames[0].as_str().unwrap());
+					
+					ArbiterServer::publish_state(&pub_state_socket);
 				},
-				MessageType::Ping => {
+				ArbiterMessageTypes::Ping => {
 					if let Some(node) = nodes.get(&message.identity) {
 						// TODO SEems unfortunate that we need to re-build the entire ping message
 						// just to forward it to the child thread
-						let child_ping = ArbiterMessage::new("", MessageType::Ping);
+						let child_ping = ArbiterMessage::new("", ArbiterMessageTypes::Ping);
 						child_ping.send(&node);
 						
-						let pong_msg = ArbiterMessage::new(&message.identity, MessageType::Pong);
+						let pong_msg = ArbiterMessage::new(&message.identity, ArbiterMessageTypes::Pong);
 						if let Some(socket) = nodes.get(server_identity) {
 							pong_msg.send(&socket);
 						}
 					} else {
 						println!("Ping received for invalid identity");
 					}
+				},
+				ArbiterMessageTypes::StateRequest => {
+					ArbiterServer::publish_state(&pub_state_socket);
 				},
 				_ => println!("Invalid message")
 			}
@@ -279,6 +315,8 @@ impl ArbiterServer {
 			if let Some(_child) = children.get(&registration_message.identity) {
 				println!("Already here");
 			} else {
+				println!("msg1 {} msg2{}", registration_message.data_frames[0].as_str().unwrap(), registration_message.data_frames[1].as_str().unwrap());
+				
 				// Create a new socket and tie it with the identity...this is how we will communicate with the child processing thread
 				let mut child_binding = "inproc://".to_string();
 				child_binding.push_str(&registration_message.identity);
@@ -307,14 +345,14 @@ impl ArbiterServer {
 		std::thread::Builder::new().name(ident.to_string())
 			.spawn(move || {
 				loop {
-					if wait_for_message(MessageType::Ping, 5000, &child_socket).is_err() {
+					if wait_for_message(ArbiterMessageTypes::Ping, 5000, &child_socket).is_err() {
 						// Send deregistration to the parent thread
-						let mut dereg_msg = ArbiterMessage::new(&ident, MessageType::Deregister);
+						let mut dereg_msg = ArbiterMessage::new(&ident, ArbiterMessageTypes::Deregister);
 						
 						// ipc sockets don't include the identity name in the message envelope,
 						// so use the first data frame to include the name of the client node
 						// that has deregistered
-						dereg_msg.data_frames[0] = zmq::Message::from(&ident);
+						dereg_msg.data_frames.push(zmq::Message::from(&ident));
 						dereg_msg.send(&child_socket);
 
 						// Exit the thread
@@ -359,10 +397,10 @@ fn receive_multi(socket : &zmq::Socket) -> ArbiterMessage {
 	// message is large enough to construct an Arbiter Message, 
 	// that is, it has a header frame and we can determine the
 	// message type
-	if message.len() == header_index + 6 && message[header_index].len() == 2 {
+	if message.len() >= header_index && message[header_index].len() == 2 {
 		ArbiterMessage {
 			identity,
-			message_type : MessageType::from_u8(message[header_index][1]),
+			message_type : ArbiterMessageTypes::from_u8(message[header_index][1]),
 			data_frames : message.split_off(header_index + 1),
 		}
 	} else {
@@ -371,7 +409,7 @@ fn receive_multi(socket : &zmq::Socket) -> ArbiterMessage {
 		// instead return an error (option?) struct TODO
 		ArbiterMessage {
 			identity,
-			message_type : MessageType::UNKNOWN,
+			message_type : ArbiterMessageTypes::UNKNOWN,
 			data_frames : Vec::new(),
 		}
 	}
@@ -393,7 +431,7 @@ fn receive_message(socket : &zmq::Socket) -> zmq::Result<ArbiterMessage> {
 //	}
 }
 
-fn wait_for_message(message_type : MessageType, timeout_ms : i64, socket : &zmq::Socket) ->zmq::Result<ArbiterMessage> {
+fn wait_for_message(message_type : ArbiterMessageTypes, timeout_ms : i64, socket : &zmq::Socket) ->zmq::Result<ArbiterMessage> {
 	// Poll on the socket for any received data, once a message is received, pull it off the socket
 	if socket.poll(zmq::PollEvents::POLLIN, timeout_ms).unwrap() > 0 {
 		let result = receive_message(&socket);

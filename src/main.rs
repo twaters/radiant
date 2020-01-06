@@ -3,10 +3,26 @@ use radiant::arbiter_api;
 
 fn main() {
     let ctx = zmq::Context::new();
-	let arbiter = arbiter_api::ArbiterClient::new(&ctx, "CLIENT1", "tcp://127.0.0.1:5555");
-	let arbiter = arbiter_api::ArbiterClient::new(&ctx, "CLIENT2", "tcp://127.0.0.1:5555");
-	let arbiter = arbiter_api::ArbiterClient::new(&ctx, "CLIENT3", "tcp://127.0.0.1:5555");
-	let arbiter = arbiter_api::ArbiterClient::new(&ctx, "CLIENT4", "tcp://127.0.0.1:5555");
+	let mut client1 = arbiter_api::ArbiterClient::new(&ctx, "CLIENT1");
+	client1.add_message(arbiter_api::MessageType::Command, "c1 command".to_string());
+	client1.add_message(arbiter_api::MessageType::Data, "c1 notif".to_string());
+	client1.connect(&ctx, "tcp://127.0.0.1:5555");
+	
+	let mut client2 = arbiter_api::ArbiterClient::new(&ctx, "CLIENT2");
+	client2.add_message(arbiter_api::MessageType::Command, "c2 command".to_string());
+	client2.add_message(arbiter_api::MessageType::Data, "c2 notif".to_string());
+	client2.connect(&ctx, "tcp://127.0.0.1:5555");
+	
+	let mut client3 = arbiter_api::ArbiterClient::new(&ctx, "CLIENT3");
+	client3.add_message(arbiter_api::MessageType::Command, "c3 command".to_string());
+	client3.add_message(arbiter_api::MessageType::Data, "c3 notif".to_string());
+	client3.connect(&ctx, "tcp://127.0.0.1:5555");
+	
+	let mut client4 = arbiter_api::ArbiterClient::new(&ctx, "CLIENT4");
+	client4.add_message(arbiter_api::MessageType::Command, "c4 command".to_string());
+	client4.add_message(arbiter_api::MessageType::Data, "c4 notif".to_string());
+	client4.connect(&ctx, "tcp://127.0.0.1:5555");
+	
 	std::thread::sleep(std::time::Duration::from_millis(10000));
 	
 //	let req_socket = ctx.socket(zmq::ROUTER).unwrap();
